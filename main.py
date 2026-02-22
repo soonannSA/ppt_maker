@@ -235,26 +235,54 @@ def export_pptx(slides_data: List[SlideData]):
                         except Exception as e:
                             print(f"Image overlay failed: {e}")
 
-    # Embed JSON state as a custom file inside the ZIP for loading later
-    # NOTE: We do NOT use prs.core_properties.comments because large JSON (with
-    # base64 images) embedded in XML causes memory spikes and corrupts the PPTX.
-
+    # Save PPTX to bytes first
     pptx_io = io.BytesIO()
     prs.save(pptx_io)
+    pptx_io.seek(0)
 
-    # Append custom app_state.json into the PPTX zip archive
+    # Embed JSON state as a properly-registered custom part inside the ZIP.
+    # Simply appending with mode='a' leaves the part unregistered in [Content_Types].xml,
+    # which causes PowerPoint to flag the file as corrupt and strip picture shapes on repair.
+    # Instead we re-pack the entire zip with the new part registered correctly.
     try:
         state_dict = {"slides": [s.model_dump() if hasattr(s, "model_dump") else s.dict() for s in slides_data]}
-        state_json = json.dumps(state_dict)
-        with zipfile.ZipFile(pptx_io, mode='a', compression=zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr('app_state.json', state_json)
+        state_json = json.dumps(state_dict).encode("utf-8")
+
+        APP_STATE_PATH = "app_state.json"
+        CONTENT_TYPE_ENTRY = (
+            '<Override PartName="/app_state.json" '
+            'ContentType="application/json"/>'
+        )
+
+        original_zip_bytes = pptx_io.read()
+        output_io = io.BytesIO()
+
+        with zipfile.ZipFile(io.BytesIO(original_zip_bytes), 'r') as zin:
+            with zipfile.ZipFile(output_io, 'w', compression=zipfile.ZIP_DEFLATED) as zout:
+                for item in zin.infolist():
+                    data = zin.read(item.filename)
+                    if item.filename == "[Content_Types].xml":
+                        # Inject our custom content type entry before the closing tag
+                        ct_xml = data.decode("utf-8")
+                        if APP_STATE_PATH not in ct_xml:
+                            ct_xml = ct_xml.replace(
+                                "</Types>",
+                                f"{CONTENT_TYPE_ENTRY}</Types>"
+                            )
+                        data = ct_xml.encode("utf-8")
+                    zout.writestr(item, data)
+                # Write the new custom part
+                zout.writestr(APP_STATE_PATH, state_json)
+
+        output_io.seek(0)
+        final_bytes = output_io.read()
     except Exception as e:
         print(f"Error embedding state into ZIP: {e}")
+        pptx_io.seek(0)
+        final_bytes = pptx_io.read()
 
-    pptx_io.seek(0)
-    
     return Response(
-        content=pptx_io.read(), 
+        content=final_bytes,
         media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
         headers={"Content-Disposition": "attachment; filename=table_bundle.pptx"}
     )
@@ -287,7 +315,7 @@ async def import_pptx(file: UploadFile = File(...)):
 if getattr(sys, 'frozen', False):
     frontend_dir = os.path.join(sys._MEIPASS, "dist")
 else:
-    frontend_dir = os.path.join(os.path.dirname(__file__), "frontend_dist")
+    frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
 
 if os.path.exists(frontend_dir):
     app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="static")
