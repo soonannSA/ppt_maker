@@ -287,7 +287,7 @@ async def import_pptx(file: UploadFile = File(...)):
 if getattr(sys, 'frozen', False):
     frontend_dir = os.path.join(sys._MEIPASS, "dist")
 else:
-    frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+    frontend_dir = os.path.join(os.path.dirname(__file__), "frontend_dist")
 
 if os.path.exists(frontend_dir):
     app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="static")
